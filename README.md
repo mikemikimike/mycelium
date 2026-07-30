@@ -1,6 +1,6 @@
 # Mycelium
 
-[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60&release=1.18.0)](https://pypi.org/project/mycelium-runtime/)
+[![PyPI version](https://img.shields.io/pypi/v/mycelium-runtime.svg?cacheSeconds=60)](https://pypi.org/project/mycelium-runtime/)
 [![Python](https://img.shields.io/pypi/pyversions/mycelium-runtime.svg)](https://pypi.org/project/mycelium-runtime/)
 [![Downloads](https://static.pepy.tech/badge/mycelium-runtime)](https://pepy.tech/project/mycelium-runtime)
 
@@ -8,7 +8,7 @@
 
 Stops duplicate side effects on retry/redispatch, blocks bad tool args and out-of-scope calls, and keeps tool data fresh. Not recovery after. Not tracing or dashboards.
 
-*Early but API-stable (**v1.18.0**): breaking changes only at major versions. More guards planned.*
+*Early but API-stable (**v1.18.x**): breaking changes only at major versions. More guards planned.*
 
 ## Who it's for
 
@@ -28,7 +28,7 @@ These aren't reasoning failures. They're runtime failures. Mycelium sits between
   - **Operator release (v1.15.0):** when a hard-block needs a human, an operator verifies with the provider and records it (`release(verified=...)` / `mycelium transitions release`) — `completed` returns the recorded result, `not_executed` grants exactly one re-execution. One-shot, fail-closed, audit-stamped; triage via `mycelium transitions list --stuck`
   - **Worker-death signal (v1.16.0, opt-in):** when `reclaim_requires_death_signal: true`, EXPIRED entries cannot be reclaimed or released without affirmative death evidence (`mark_worker_dead()` / `mycelium transitions mark-dead`, or heartbeat older than the grace window). Prevents reclaiming from a worker that is merely paused.
   - **Provider idempotency-key validity (v1.17.0):** when `provider_idempotency_key_ttl` is set, a same-key retry that exceeds the window hard-blocks instead of retrying — the provider may have purged its deduplication state.
-  - **Atomicity contract (v1.18.0):** every terminal-outcome write uses CAS (`try_transition`) — already-resolved transitions refuse overwrites. Owner fencing in `@ledger`/`@ledger_sync` prevents stale workers from overwriting another worker's outcome.
+  - **Atomicity contract (v1.18+):** every terminal-outcome write uses CAS (`try_transition`) — already-resolved transitions refuse overwrites. Owner fencing in `@ledger`/`@ledger_sync` prevents stale workers from overwriting another worker's outcome.
   - **Unclassified tools:** tools without a `transition_binding` have unknown side-effect semantics. `unclassified_policy: strict` routes retries through a conservative binding so failed retries hard-block instead of re-executing (default `warn` emits a one-time `UserWarning`). Side-effecting tools using memory storage get a one-time warning — the duplicate-side-effect guard only holds within the process.
   - **Stale lease (`EXPIRED`):** strict classes reclaim only when reconcile proves `NOT_EXECUTED` (fail-closed without a ref)
   - **Lease auto-renew (v1.14.0):** while a `@ledger` / `@ledger_sync` tool runs, Mycelium extends `lease_until` automatically (default every `lease_ttl / 3`) so long work does not look dead to a redispatched peer. Set `lease_renew_interval: 0` to disable; call `renew_lease()` for a manual bump or when claiming outside the decorator.
