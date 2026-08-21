@@ -5,6 +5,20 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+- Effect identity is now authoritative via the derived `effect_id` secondary
+  index: duplicate claims with different explicit `request_id` values but the
+  same logical effect converge on one durable row and deduplicate there.
+
+- Opt-in provider-key injection shipped for effect identity reuse:
+  `propagate_effect_id_as_provider_key` can populate the provider idempotency
+  key from the derived effect identity when a tool declares a provider-key
+  parameter.
+
+- Change 5 delivered: a deterministic in-process
+  `state-machine-exhaustive` verify scenario now exercises crash/resume,
+  stale-fence takeover, BLIND UNKNOWN parking, and claim-race interleavings,
+  with a companion formal spec artifact at `sdk/docs/spec/effect_state.tla`.
+
 - Unified durable WAL intent (`EffectState`) completes the effect-commit
   protocol. New `mycelium.transition.EffectState` (INTENDED / ATTEMPTING /
   COMMITTED / ABORTED / UNKNOWN) plus `resolve_effect_state(entry)` collapses
@@ -24,9 +38,6 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
   EffectState-string semantics), and `profile: production` now defaults
   `action_ledger.unclassified_policy` to `strict` when omitted
   (explicit `warn` remains honored).
-
-- TODO(Change 5): exhaustive interleaving simulation and a formal
-  TLA+/PlusCal spec of the intent state machine.
 
 - Budget accounting now warns when `record_usage(steps=...)` is combined with
   the step meter that `check()` and `@budget_guard` enable by default, preventing
