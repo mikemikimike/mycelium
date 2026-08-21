@@ -146,7 +146,7 @@ def _worker_b(payload: dict[str, Any]) -> None:
 
     url = payload["url"]
     keys = payload["keys"]
-    request_id = payload["request_id"]
+    request_id = payload.get("request_id_b") or payload["request_id"]
     client = redis.Redis.from_url(url, decode_responses=True)
     try:
         deadline = time.time() + float(payload["ready_timeout"])
@@ -197,6 +197,7 @@ def prove_two_worker_redis_redispatch(
     lease_ttl: float = 30.0,
     poll_timeout: float = 10.0,
     ready_timeout: float = 5.0,
+    request_id_b: str | None = None,
 ) -> dict[str, Any]:
     """Run the two-worker Redis proof. Raises ``AssertionError`` on failure.
 
@@ -206,6 +207,8 @@ def prove_two_worker_redis_redispatch(
     import json
 
     import redis
+
+    from mycelium import RedisLedgerStorage
 
     url = url or resolve_redis_url()
     if not redis_reachable(url):
@@ -220,6 +223,7 @@ def prove_two_worker_redis_redispatch(
         "url": url,
         "keys": keys,
         "request_id": request_id,
+        "request_id_b": request_id_b,
         "work_seconds": work_seconds,
         "lease_ttl": lease_ttl,
         "poll_timeout": poll_timeout,
@@ -264,6 +268,10 @@ def prove_two_worker_redis_redispatch(
         assert body["terminal_outcome"] == "COMPLETED"
         assert proc_a.exitcode == 0, f"worker A exit {proc_a.exitcode}"
         assert proc_b.exitcode == 0, f"worker B exit {proc_b.exitcode}"
+        storage = RedisLedgerStorage(url, prefix=keys["prefix"], in_flight_ttl=3600.0)
+        rows = storage.list_all()
+        assert len(rows) == 1, f"expected a single ledger row, got {len(rows)}"
+        assert rows[0].request_id == request_id
 
         return {
             "url": url,

@@ -54,6 +54,39 @@ class RedisEntryStorage:
         base = self._prefix.rstrip(":")
         return f"{base}-tomb:{request_id}"
 
+    def _effect_key(self, effect_id: str) -> str:
+        if self._prefix.startswith("mycelium:action:"):
+            return f"mycelium:effect:{effect_id}"
+        # Sibling namespace so list_all(prefix*) never treats effect maps as entries.
+        base = self._prefix.rstrip(":")
+        return f"{base}-effect:{effect_id}"
+
+    def _mapped_target_exists(self, pipe: Any, request_id: str) -> bool:
+        """True when the mapped request still has a primary or tombstone row."""
+        return (
+            pipe.get(self._key(request_id)) is not None
+            or pipe.get(self._tombstone_key(request_id)) is not None
+        )
+
+    def _live_effect_owner(
+        self,
+        pipe: Any,
+        effect_key: str,
+        *,
+        entry_request_id: str,
+    ) -> str | None:
+        """Return a live foreign owner for *effect_key*, or ``None`` if free/stale.
+
+        Stale mappings (pointing at a vanished request_id) are treated as absent
+        so a later ``MULTI`` can overwrite them; they are not blocking.
+        """
+        mapped = pipe.get(effect_key)
+        if mapped in (None, entry_request_id):
+            return None
+        if self._mapped_target_exists(pipe, mapped):
+            return mapped
+        return None
+
     @staticmethod
     def _fence_from_payload(raw: str | None) -> int:
         if raw is None:
@@ -132,29 +165,56 @@ class RedisEntryStorage:
             return self._from_dict(json.loads(raw))
         return self._restore_from_tombstone(request_id)
 
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        effect_key = self._effect_key(effect_id)
+        request_id = self._client.get(effect_key)
+        if not request_id:
+            return None
+        entry = self.get(request_id)
+        if entry is not None:
+            return entry
+        # Stale mapping: entry row (and tombstone) are gone — drop the pointer.
+        self._client.delete(effect_key)
+        return None
+
     def set(self, entry: E) -> None:
         from redis.exceptions import WatchError
 
         payload = json.dumps(entry.to_dict(), default=str)
         key = self._key(entry.request_id)
         tomb_key = self._tombstone_key(entry.request_id)
+        effect_id = str(getattr(entry, "effect_id", "") or "")
+        effect_key = self._effect_key(effect_id) if effect_id else None
         incoming_fence = int(getattr(entry, "fence", 0) or 0)
         for _ in range(32):
             try:
                 with self._client.pipeline(transaction=True) as pipe:
-                    pipe.watch(key, tomb_key)
+                    watch_keys = [key, tomb_key]
+                    if effect_key is not None:
+                        watch_keys.append(effect_key)
+                    pipe.watch(*watch_keys)
                     stored_fence = max(
                         self._fence_from_payload(pipe.get(key)),
                         self._fence_from_payload(pipe.get(tomb_key)),
                     )
                     if stored_fence > incoming_fence:
                         return
+                    if effect_key is not None:
+                        foreign = self._live_effect_owner(
+                            pipe, effect_key, entry_request_id=entry.request_id
+                        )
+                        if foreign is not None:
+                            raise RuntimeError(
+                                f"effect_id {effect_id!r} already mapped to request {foreign!r}"
+                            )
                     pipe.multi()
                     if entry.status == "in-flight" and self._in_flight_ttl:
                         pipe.set(key, payload, ex=int(self._in_flight_ttl))
                     else:
                         pipe.set(key, payload)
                     pipe.set(tomb_key, payload)
+                    if effect_key is not None:
+                        pipe.set(effect_key, entry.request_id)
                     pipe.execute()
                     return
             except WatchError:
@@ -193,6 +253,14 @@ class RedisEntryStorage:
                 leased = with_lease(entry, now=time.time(), lease_ttl=lease_ttl)
                 if self._try_initial_claim(key, leased, ttl):
                     return "claimed", None
+                effect_id = str(getattr(entry, "effect_id", "") or "")
+                if effect_id:
+                    collided = self.get_by_effect_id(effect_id)
+                    if collided is not None and collided.request_id != entry.request_id:
+                        collided_outcome = claim_inflight_outcome(collided, now=time.time())
+                        if collided_outcome == "completed":
+                            return "completed", collided
+                        return "in_flight", collided
                 continue
 
             existing = self._from_dict(json.loads(existing_raw))
@@ -213,18 +281,31 @@ class RedisEntryStorage:
         from redis.exceptions import WatchError
 
         tomb_key = self._tombstone_key(entry.request_id)
+        effect_id = str(getattr(entry, "effect_id", "") or "")
+        effect_key = self._effect_key(effect_id) if effect_id else None
         payload = json.dumps(entry.to_dict(), default=str)
         try:
             with self._client.pipeline(transaction=True) as pipe:
-                pipe.watch(key, tomb_key)
+                watch_keys = [key, tomb_key]
+                if effect_key is not None:
+                    watch_keys.append(effect_key)
+                pipe.watch(*watch_keys)
                 if pipe.get(key) is not None or pipe.get(tomb_key) is not None:
                     return False
+                if effect_key is not None:
+                    foreign = self._live_effect_owner(
+                        pipe, effect_key, entry_request_id=entry.request_id
+                    )
+                    if foreign is not None:
+                        return False
                 pipe.multi()
                 if ttl > 0:
                     pipe.set(key, payload, ex=ttl)
                 else:
                     pipe.set(key, payload)
                 pipe.set(tomb_key, payload)
+                if effect_key is not None:
+                    pipe.set(effect_key, entry.request_id)
                 pipe.execute()
                 return True
         except WatchError:
@@ -245,9 +326,14 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import claim_inflight_outcome, with_lease
 
         now = time.time()
+        effect_id = str(getattr(entry, "effect_id", "") or "")
+        effect_key = self._effect_key(effect_id) if effect_id else None
         try:
             with self._client.pipeline(transaction=True) as pipe:
-                pipe.watch(key)
+                watch_keys = [key]
+                if effect_key is not None:
+                    watch_keys.append(effect_key)
+                pipe.watch(*watch_keys)
                 raw = pipe.get(key)
                 if raw is None:
                     # Key evaporated under the watch — tombstone may still exist.
@@ -259,6 +345,12 @@ class RedisEntryStorage:
                 rerun = claim_inflight_outcome(current, now=time.time())
                 if rerun != "claimed":
                     return rerun, current
+                if effect_key is not None:
+                    foreign = self._live_effect_owner(
+                        pipe, effect_key, entry_request_id=entry.request_id
+                    )
+                    if foreign is not None:
+                        return "in_flight", current
                 # Reclaim: bump the fence past the superseded claim.
                 leased = with_lease(entry, now=now, lease_ttl=lease_ttl, prior=current)
                 payload = json.dumps(leased.to_dict(), default=str)
@@ -268,6 +360,8 @@ class RedisEntryStorage:
                 else:
                     pipe.set(key, payload)
                 pipe.set(self._tombstone_key(entry.request_id), payload)
+                if effect_key is not None:
+                    pipe.set(effect_key, entry.request_id)
                 pipe.execute()
                 return ("claimed", None)
         except WatchError:
@@ -288,11 +382,16 @@ class RedisEntryStorage:
         from mycelium.storage._helpers import lease_allows_renew
 
         key = self._key(entry.request_id)
+        effect_id = str(getattr(entry, "effect_id", "") or "")
+        effect_key = self._effect_key(effect_id) if effect_id else None
         payload = json.dumps(entry.to_dict(), default=str)
         for _ in range(32):
             try:
                 with self._client.pipeline(transaction=True) as pipe:
-                    pipe.watch(key)
+                    watch_keys = [key]
+                    if effect_key is not None:
+                        watch_keys.append(effect_key)
+                    pipe.watch(*watch_keys)
                     raw = pipe.get(key)
                     if raw is None:
                         # TTL eviction mid-transition: restore history, then retry.
@@ -320,9 +419,17 @@ class RedisEntryStorage:
                         now=require_lease_held_at,
                     ):
                         return False
+                    if effect_key is not None:
+                        foreign = self._live_effect_owner(
+                            pipe, effect_key, entry_request_id=entry.request_id
+                        )
+                        if foreign is not None:
+                            return False
                     pipe.multi()
                     pipe.set(key, payload)
                     pipe.set(self._tombstone_key(entry.request_id), payload)
+                    if effect_key is not None:
+                        pipe.set(effect_key, entry.request_id)
                     pipe.execute()
                     return True
             except WatchError:
@@ -363,6 +470,9 @@ class RedisLedgerStorage:
 
     def set(self, entry: Any) -> None:
         self._inner.set(entry)
+
+    def get_by_effect_id(self, effect_id: str) -> Any:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_claim_inflight(
         self,

@@ -72,6 +72,10 @@ class SqliteEntryStorage:
             f"CREATE TABLE IF NOT EXISTS {self._table} ("
             "request_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
         )
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {self._table}_effect_id_idx "
+            f"ON {self._table} (COALESCE(json_extract(payload, '$.effect_id'), request_id))"
+        )
         conn.commit()
         self._schema_ready = True
 
@@ -98,6 +102,19 @@ class SqliteEntryStorage:
                     (entry.request_id, payload),
                 )
                 conn.commit()
+
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        with self._lock:
+            with self._connect() as conn:
+                self._ensure_schema(conn)
+                row = conn.execute(
+                    f"SELECT payload FROM {self._table} "
+                    "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ?",
+                    (effect_id,),
+                ).fetchone()
+        if row is None:
+            return None
+        return self._from_dict(_payload_dict(row["payload"]))
 
     def try_claim_inflight(
         self,
@@ -126,8 +143,29 @@ class SqliteEntryStorage:
                         f"SELECT payload FROM {self._table} WHERE request_id = ?",
                         (entry.request_id,),
                     ).fetchone()
+                    effect_id = str(getattr(entry, "effect_id", "") or "")
+                    if effect_id:
+                        effect_row = conn.execute(
+                            f"SELECT payload FROM {self._table} "
+                            "WHERE COALESCE(json_extract(payload, '$.effect_id'), request_id) = ?",
+                            (effect_id,),
+                        ).fetchone()
+                        if effect_row is not None:
+                            canonical = self._from_dict(
+                                _payload_dict(effect_row["payload"])
+                            )
+                            # Same request_id: fall through to the request-keyed
+                            # reclaim path (EXPIRED/FAILED must be reclaimable).
+                            if canonical.request_id != entry.request_id:
+                                effect_outcome = claim_inflight_outcome(
+                                    canonical, now=now
+                                )
+                                if effect_outcome == "completed":
+                                    conn.commit()
+                                    return "completed", canonical
+                                conn.commit()
+                                return "in_flight", canonical
                     if row is None:
-                        # Rare race: deleted between IGNORE miss and SELECT.
                         conn.execute(
                             f"INSERT INTO {self._table} (request_id, payload) VALUES (?, ?)",
                             (entry.request_id, fresh_payload),
@@ -230,6 +268,9 @@ class SqliteLedgerStorage:
 
     def set(self, entry: Any) -> None:
         self._inner.set(entry)
+
+    def get_by_effect_id(self, effect_id: str) -> Any:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_claim_inflight(
         self,
