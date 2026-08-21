@@ -580,6 +580,11 @@ For `keyed_mutate` tools, use the same string as the provider idempotency key
 when the provider allows it (`Idempotency-Key: charge-order:ORD-123`). That
 keeps ledger identity and provider dedupe aligned.
 
+Explicit `request_id` can be an audit/business ticket, but consequential
+dedupe is authoritative on the derived `effect_id` (tool + canonicalized
+params + destination shape). Re-dispatches of the same logical effect must
+preserve that shape; changing it intentionally creates a new effect.
+
 | Inputs | → | What happens |
 |--------|---|--------------|
 | Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
