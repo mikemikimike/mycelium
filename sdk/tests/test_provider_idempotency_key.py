@@ -237,6 +237,29 @@ tools:
     assert binding.provider_idempotency_key_param == "idempotency_key"
 
 
+def test_config_parses_and_binds_effect_key_propagation_flag() -> None:
+    yaml_text = """
+transition:
+  agent_id: demo
+  policy_version: "1"
+action_ledger:
+  storage: memory
+  tools: [send_payment]
+tools:
+  send_payment:
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
+    propagate_effect_id_as_provider_key: true
+"""
+    config = load_config_from_string(yaml_text)
+    tool_config = config.tools["send_payment"]
+    assert tool_config.propagate_effect_id_as_provider_key is True
+
+    binding = config.tool_transition_binding(tool_config)
+    assert binding is not None
+    assert binding.propagate_effect_id_as_provider_key is True
+
+
 def test_config_rejects_non_string_provider_key_param() -> None:
     from mycelium import ConfigError
 
@@ -250,6 +273,23 @@ tools:
     provider_idempotency_key_param: 123
 """
     with pytest.raises(ConfigError, match="provider_idempotency_key_param"):
+        load_config_from_string(yaml_text)
+
+
+def test_config_rejects_non_bool_effect_key_propagation_flag() -> None:
+    from mycelium import ConfigError
+
+    yaml_text = """
+transition:
+  agent_id: demo
+  policy_version: "1"
+tools:
+  send_payment:
+    side_effect_class: keyed_mutate
+    provider_idempotency_key_param: idempotency_key
+    propagate_effect_id_as_provider_key: "yes"
+"""
+    with pytest.raises(ConfigError, match="propagate_effect_id_as_provider_key"):
         load_config_from_string(yaml_text)
 
 
