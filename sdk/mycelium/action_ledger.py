@@ -2674,10 +2674,18 @@ class ActionLedger:
                 binding=binding,
             )
             if existing is not None:
+                gate_incoming_key = incoming_key
+                if (
+                    gate_incoming_key is None
+                    and binding.propagate_effect_id_as_provider_key
+                    and binding.provider_idempotency_key_param is not None
+                    and existing.provider_idempotency_key is not None
+                ):
+                    gate_incoming_key = existing.provider_idempotency_key
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
-                    incoming_provider_idempotency_key=incoming_key,
+                    incoming_provider_idempotency_key=gate_incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(canonical_request_id)
@@ -2766,10 +2774,18 @@ class ActionLedger:
                 return existing
             if outcome == "in_flight" and existing is not None:
                 canonical_request_id = existing.request_id
+                gate_incoming_key = incoming_key
+                if (
+                    gate_incoming_key is None
+                    and binding.propagate_effect_id_as_provider_key
+                    and binding.provider_idempotency_key_param is not None
+                    and existing.provider_idempotency_key is not None
+                ):
+                    gate_incoming_key = existing.provider_idempotency_key
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
-                    incoming_provider_idempotency_key=incoming_key,
+                    incoming_provider_idempotency_key=gate_incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(canonical_request_id)
@@ -2950,10 +2966,18 @@ class ActionLedger:
                 binding=binding,
             )
             if existing is not None:
+                gate_incoming_key = incoming_key
+                if (
+                    gate_incoming_key is None
+                    and binding.propagate_effect_id_as_provider_key
+                    and binding.provider_idempotency_key_param is not None
+                    and existing.provider_idempotency_key is not None
+                ):
+                    gate_incoming_key = existing.provider_idempotency_key
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
-                    incoming_provider_idempotency_key=incoming_key,
+                    incoming_provider_idempotency_key=gate_incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(canonical_request_id)
@@ -3042,10 +3066,18 @@ class ActionLedger:
                 return existing
             if outcome == "in_flight" and existing is not None:
                 canonical_request_id = existing.request_id
+                gate_incoming_key = incoming_key
+                if (
+                    gate_incoming_key is None
+                    and binding.propagate_effect_id_as_provider_key
+                    and binding.provider_idempotency_key_param is not None
+                    and existing.provider_idempotency_key is not None
+                ):
+                    gate_incoming_key = existing.provider_idempotency_key
                 gate = resolve_side_effect_gate(
                     existing,
                     binding,
-                    incoming_provider_idempotency_key=incoming_key,
+                    incoming_provider_idempotency_key=gate_incoming_key,
                 )
                 if gate == TransitionGate.REPAIR:
                     self.repair_transition(canonical_request_id)
@@ -3363,6 +3395,72 @@ class ActionLedger:
         ):
             raise LedgerOutcomeAlreadySetError(
                 f"Cannot attach external operation ref to {request_id!r}: transition superseded"
+            )
+        return entry
+
+    def ensure_provider_idempotency_key(
+        self,
+        request_id: str,
+        provider_key: str,
+        *,
+        expected_owner: str | None = None,
+        expected_fence: int | None = None,
+    ) -> LedgerEntry:
+        """Persist a provider idempotency key with fenced CAS.
+
+        Used by effect-id propagation after the ATTEMPTING decision is recorded.
+        If a key is already present, it is reused verbatim and must match.
+        """
+        existing = self._get_entry(request_id)
+        if existing is None:
+            raise LedgerError(
+                f"Cannot set provider idempotency key on unknown request {request_id!r}"
+            )
+        if expected_fence is None:
+            raise LedgerError(
+                f"Setting provider idempotency key on {request_id!r} requires the claim fence"
+            )
+        if existing.effect_protocol_required and not _has_allowed_attempting_decision(existing):
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot set provider idempotency key on {request_id!r}: "
+                "no durable ATTEMPTING decision"
+            )
+        if existing.provider_idempotency_key is not None:
+            if existing.provider_idempotency_key != provider_key:
+                raise LedgerHardBlockError(
+                    f"Provider idempotency key mismatch for {request_id!r}: "
+                    f"stored={existing.provider_idempotency_key!r} "
+                    f"incoming={provider_key!r}"
+                )
+            return existing
+        pkey_first_attempt = existing.provider_key_first_attempt_at
+        if pkey_first_attempt is None:
+            pkey_first_attempt = time.time()
+        entry = replace(
+            existing,
+            provider_idempotency_key=provider_key,
+            provider_key_first_attempt_at=pkey_first_attempt,
+        )
+        if not self._try_transition(
+            entry,
+            expected_from=frozenset({existing.terminal_outcome}),
+            expected_owner=expected_owner,
+            expected_fence=expected_fence,
+            expected_effect_state=(
+                EffectState.ATTEMPTING.value if existing.effect_protocol_required else None
+            ),
+        ):
+            current = self._get_entry(request_id)
+            if current is not None and current.provider_idempotency_key is not None:
+                if current.provider_idempotency_key != provider_key:
+                    raise LedgerHardBlockError(
+                        f"Provider idempotency key mismatch for {request_id!r}: "
+                        f"stored={current.provider_idempotency_key!r} "
+                        f"incoming={provider_key!r}"
+                    )
+                return current
+            raise LedgerOutcomeAlreadySetError(
+                f"Cannot set provider idempotency key on {request_id!r}: transition superseded"
             )
         return entry
 
@@ -4176,6 +4274,49 @@ def _claim_kwargs(kwargs: dict[str, Any], clean_kwargs: dict[str, Any]) -> dict[
     return claim_kwargs
 
 
+def _inject_provider_key_from_effect_id(
+    *,
+    ledger: ActionLedger,
+    request_id: str,
+    clean_kwargs: dict[str, Any],
+    transition_binding: ToolTransitionBinding | None,
+    owner: str | None,
+    fence: int,
+) -> dict[str, Any]:
+    """Inject provider key into body kwargs when propagation is explicitly enabled."""
+    if transition_binding is None:
+        return clean_kwargs
+    if not transition_binding.propagate_effect_id_as_provider_key:
+        return clean_kwargs
+    param = transition_binding.provider_idempotency_key_param
+    if param is None:
+        return clean_kwargs
+    if param in clean_kwargs:
+        return clean_kwargs
+
+    entry = ledger.get(request_id)
+    if entry is None:
+        raise LedgerError(f"Cannot inject provider idempotency key for {request_id!r}")
+    provider_key = entry.provider_idempotency_key
+    if provider_key is None:
+        effect_id = entry.effect_id
+        if effect_id is None:
+            raise LedgerError(
+                f"Cannot inject provider idempotency key for {request_id!r}: missing effect_id"
+            )
+        provider_key = f"mycelium:{effect_id}"
+        stamped = ledger.ensure_provider_idempotency_key(
+            request_id,
+            provider_key,
+            expected_owner=owner,
+            expected_fence=fence,
+        )
+        provider_key = str(stamped.provider_idempotency_key)
+    injected = dict(clean_kwargs)
+    injected[param] = provider_key
+    return injected
+
+
 def _emit_tool_receipt(
     audit_emitter: AuditReceiptEmitter | None,
     ledger: ActionLedger,
@@ -4653,6 +4794,14 @@ def _run_ledgered(
         if policy_blocked is not None:
             raise policy_blocked
         _raise_denied_decision(request_id, decision)
+        exec_source_kwargs = _inject_provider_key_from_effect_id(
+            ledger=ledger,
+            request_id=request_id,
+            clean_kwargs=clean_kwargs,
+            transition_binding=transition_binding,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,
@@ -4673,7 +4822,7 @@ def _run_ledgered(
         policy = get_active_secret_policy()
         extra = policy.secret_fields if policy is not None else frozenset()
         exec_args, exec_kwargs = resolve_declared_secret_fields(
-            func, args, clean_kwargs, extra_fields=extra
+            func, args, exec_source_kwargs, extra_fields=extra
         )
         with _lease_auto_renew(
             ledger,
@@ -5022,6 +5171,14 @@ async def _run_ledgered_async(
         if policy_blocked is not None:
             raise policy_blocked
         _raise_denied_decision(request_id, decision)
+        exec_source_kwargs = _inject_provider_key_from_effect_id(
+            ledger=ledger,
+            request_id=request_id,
+            clean_kwargs=clean_kwargs,
+            transition_binding=transition_binding,
+            owner=owner,
+            fence=fence,
+        )
 
         ledger._emit_outcome(
             request_id=request_id,
@@ -5042,7 +5199,7 @@ async def _run_ledgered_async(
         policy = get_active_secret_policy()
         extra = policy.secret_fields if policy is not None else frozenset()
         exec_args, exec_kwargs = resolve_declared_secret_fields(
-            func, args, clean_kwargs, extra_fields=extra
+            func, args, exec_source_kwargs, extra_fields=extra
         )
         with _lease_auto_renew(
             ledger,

@@ -750,6 +750,7 @@ class ToolTransitionBinding:
     capability: ToolCapability = ToolCapability.BLIND
     explicit_capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
+    propagate_effect_id_as_provider_key: bool = False
     provider_idempotency_key_ttl: float | None = None
     request_id_from: str | None = None
 
@@ -766,6 +767,7 @@ class ToolTransitionBinding:
         spendability: Spendability | None = None,
         capability: ToolCapability | None = None,
         provider_idempotency_key_param: str | None = None,
+        propagate_effect_id_as_provider_key: bool = False,
         provider_idempotency_key_ttl: float | None = None,
         request_id_from: str | None = None,
     ) -> ToolTransitionBinding:
@@ -817,6 +819,7 @@ class ToolTransitionBinding:
             capability=resolved_capability,
             explicit_capability=capability,
             provider_idempotency_key_param=provider_idempotency_key_param,
+            propagate_effect_id_as_provider_key=propagate_effect_id_as_provider_key,
             provider_idempotency_key_ttl=provider_idempotency_key_ttl,
             request_id_from=request_id_from,
         )
