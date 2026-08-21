@@ -460,6 +460,7 @@ def test_cli_smoke_each_scenario(tmp_path: Path) -> None:
         "destructive-confirm",
         "authority-window",
         "use-time-currency",
+        "state-machine-exhaustive",
     ):
         code = main(
             [
@@ -674,6 +675,7 @@ def test_all_order_sqlite(tmp_path: Path, scenario: str) -> None:
         "destructive-confirm",
         "authority-window",
         "use-time-currency",
+        "state-machine-exhaustive",
         "simulation",
     ]
     assert all(item.status == VerificationStatus.PASS for item in report.scenarios)
