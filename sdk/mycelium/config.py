@@ -358,6 +358,7 @@ class ToolConfig:
     spendability: Spendability | None = None
     capability: ToolCapability | None = None
     provider_idempotency_key_param: str | None = None
+    propagate_effect_id_as_provider_key: bool = False
     provider_idempotency_key_ttl: float | None = None
     request_id_from: str | None = None
     callable_path: str | None = None
@@ -1747,6 +1748,9 @@ class MyceliumConfig:
             provider_idempotency_key_param=(
                 tool_config.provider_idempotency_key_param
             ),
+            propagate_effect_id_as_provider_key=(
+                tool_config.propagate_effect_id_as_provider_key
+            ),
             provider_idempotency_key_ttl=(
                 tool_config.provider_idempotency_key_ttl
             ),
@@ -2229,6 +2233,15 @@ def _parse_tool_config(
             )
         provider_idempotency_key_param = value
 
+    propagate_effect_id_as_provider_key = False
+    if "propagate_effect_id_as_provider_key" in raw:
+        value = raw["propagate_effect_id_as_provider_key"]
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"tool '{name}': propagate_effect_id_as_provider_key must be a bool"
+            )
+        propagate_effect_id_as_provider_key = value
+
     provider_idempotency_key_ttl: float | None = None
     if "provider_idempotency_key_ttl" in raw:
         value = raw["provider_idempotency_key_ttl"]
@@ -2367,6 +2380,7 @@ def _parse_tool_config(
         spendability=spendability,
         capability=capability,
         provider_idempotency_key_param=provider_idempotency_key_param,
+        propagate_effect_id_as_provider_key=propagate_effect_id_as_provider_key,
         provider_idempotency_key_ttl=provider_idempotency_key_ttl,
         request_id_from=request_id_from,
         callable_path=callable_path,
@@ -2476,6 +2490,9 @@ def _apply_action_ledger_tools(
             side_effect_boundary=existing.side_effect_boundary,
             spendability=existing.spendability,
             provider_idempotency_key_param=existing.provider_idempotency_key_param,
+            propagate_effect_id_as_provider_key=(
+                existing.propagate_effect_id_as_provider_key
+            ),
             provider_idempotency_key_ttl=existing.provider_idempotency_key_ttl,
             request_id_from=existing.request_id_from,
             callable_path=existing.callable_path,

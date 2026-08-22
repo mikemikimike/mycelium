@@ -36,7 +36,10 @@ from mycelium.transition import (
     derive_effect_id,
     derive_effect_id_for_call,
 )
-from mycelium.verify.invariants import check_at_most_one_committed_effect_state
+from mycelium.verify.invariants import (
+    check_at_most_one_committed_effect_state,
+    check_no_duplicate_effect_ids,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -297,7 +300,46 @@ def test_concurrent_workers_same_call_collide_on_one_row() -> None:
     entries = storage.list_all()
     assert len(entries) == 1
     assert check_at_most_one_committed_effect_state(entries) == []
+    assert check_no_duplicate_effect_ids(entries) == []
     assert entries[0].resolved_effect_state().value == "COMMITTED"
+
+
+def test_explicit_request_id_redispatch_collides_on_effect_id_row() -> None:
+    storage = InMemoryLedgerStorage()
+    binding = _binding()
+    ledger_inst = ActionLedger(storage=storage)
+    kwargs = {
+        "recipient": "billing@customer.com",
+        "amount": 10.0,
+        "tool_call_id": "call_effect_collision_1",
+    }
+
+    with execution_scope(TransitionScope(thread_id="thread-1", run_id="run-1")):
+        first = ledger_inst.claim_side_effecting(
+            "audit-req-1",
+            "send_email",
+            (),
+            kwargs,
+            binding,
+        )
+        ledger_inst.record_decision(
+            first.request_id,
+            {"allowed": True, "verdicts": [], "denied_reasons": []},
+            expected_owner=first.owner,
+            expected_fence=first.fence,
+        )
+        ledger_inst.complete(first.request_id, {"ok": True}, expected_fence=first.fence)
+        replay = ledger_inst.claim_side_effecting(
+            "audit-req-2",
+            "send_email",
+            (),
+            kwargs,
+            binding,
+        )
+
+    assert replay.request_id == "audit-req-1"
+    assert replay.result == {"ok": True}
+    assert len(storage.list_all()) == 1
 
 
 def test_explicit_destination_in_preimage() -> None:

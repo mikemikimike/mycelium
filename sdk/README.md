@@ -580,6 +580,11 @@ For `keyed_mutate` tools, use the same string as the provider idempotency key
 when the provider allows it (`Idempotency-Key: charge-order:ORD-123`). That
 keeps ledger identity and provider dedupe aligned.
 
+Explicit `request_id` can be an audit/business ticket, but consequential
+dedupe is authoritative on the derived `effect_id` (tool + canonicalized
+params + destination shape). Re-dispatches of the same logical effect must
+preserve that shape; changing it intentionally creates a new effect.
+
 | Inputs | → | What happens |
 |--------|---|--------------|
 | Same explicit `request_id` + same tool/scope/args | → | Same transition — return stored result or poll |
@@ -744,9 +749,13 @@ Seven fields decide whether an unresolved prior execution is merely **wasteful**
 | 2 | `capability` | Whether recovery is intrinsically safe, can query the outcome, or is blind (`idempotent` / `queryable` / `blind`) |
 | 3 | `spendability` | How many times the same intent may spend (`multi_use` / `single_use` / `non_replayable`) |
 | 4 | `side_effect_boundary` | Whether the external call was crossed (`not_crossed` / `maybe_crossed` / `crossed`) |
-| 5 | `terminal_outcome` | Where the prior attempt ended (`IN_FLIGHT`, `COMPLETED`, `UNKNOWN`, `EXPIRED`, …) |
+| 5 | `terminal_outcome` | Legacy resolution field (`IN_FLIGHT`, `COMPLETED`, `UNKNOWN`, `EXPIRED`, …) used for backward compatibility |
 | 6 | `external_operation_ref` | Provider handle for read-only reconcile (id or idempotency key) |
 | 7 | `retry_permission` | Whether automatic retry is allowed (and same-key enforcement when opted in) |
+
+Primary intent is the unified `EffectState` machine (`INTENDED -> ATTEMPTING ->
+COMMITTED|ABORTED|UNKNOWN`); legacy `effect_phase` and `terminal_outcome` are
+compatibility fields that fold into that single state.
 
 **Invariant:** for a given tool class, the fields that class **requires** must already be **supported and recorded** on the transition before a redispatch is treated as a safe retry. Reads need a lighter set (class + terminal + lease). Payment / write / email / subagent need spendability, boundary, terminal outcome, and usually an external receipt/ref — without them, a second dispatch is an **unsupported second transition**, not a retry.
 

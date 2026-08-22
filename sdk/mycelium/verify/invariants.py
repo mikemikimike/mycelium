@@ -21,6 +21,7 @@ __all__ = [
     "InvariantViolation",
     "check_at_most_one_committed",
     "check_at_most_one_committed_effect_state",
+    "check_no_duplicate_effect_ids",
     "check_effect_state_consistency",
     "check_provider_mapping",
     "committed_effect_ids",
@@ -134,6 +135,31 @@ def check_at_most_one_committed_effect_state(
                 InvariantViolation(
                     ref,
                     f"effect {ref!r} EffectState.COMMITTED {len(rids)} times: {sorted(rids)}",
+                )
+            )
+    return violations
+
+
+def check_no_duplicate_effect_ids(entries: Iterable[Any]) -> list[InvariantViolation]:
+    """Assert: each effect_id maps to at most one stored ledger row."""
+    by_effect: dict[str, list[str]] = defaultdict(list)
+    for entry in entries:
+        effect_id = str(
+            getattr(entry, "effect_id", None)
+            or getattr(entry, "request_id", None)
+            or ""
+        )
+        if not effect_id:
+            continue
+        by_effect[effect_id].append(str(getattr(entry, "request_id", "?")))
+    violations: list[InvariantViolation] = []
+    for effect_id, request_ids in by_effect.items():
+        unique_request_ids = sorted(set(request_ids))
+        if len(unique_request_ids) > 1:
+            violations.append(
+                InvariantViolation(
+                    effect_id,
+                    f"effect {effect_id!r} stored in multiple rows: {unique_request_ids}",
                 )
             )
     return violations

@@ -36,6 +36,7 @@ from mycelium.verify.invariants import (
     check_at_most_one_committed,
     check_at_most_one_committed_effect_state,
     check_effect_state_consistency,
+    check_no_duplicate_effect_ids,
     check_provider_mapping,
 )
 from mycelium.verify.registry import ScenarioContext, verify_scenario
@@ -184,8 +185,9 @@ def _run_fence_takeover(
     decisions: list[str] = []
     provider_effects: list[tuple[str, str]] = []
     request_id = iso.track(iso.namespace.request_id("sim", "fence"))
+    redispatch_request_id = f"{request_id}:redispatch"
     binding = _idempotent_binding()
-    kwargs = {"request_id": request_id, "thread_id": "verify", "run_id": "verify"}
+    kwargs = {"thread_id": "verify", "run_id": "verify"}
 
     a = make_ledger(iso.open_storage(), binding=binding, lease_ttl=0.3)
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
@@ -196,7 +198,13 @@ def _run_fence_takeover(
 
     b = make_ledger(iso.open_storage(), binding=binding, lease_ttl=30.0)
     with execution_scope(TransitionScope(thread_id="verify", run_id="verify")):
-        entry_b = b.claim_side_effecting(request_id, SYNTHETIC_TOOL, (1,), kwargs, binding)
+        entry_b = b.claim_side_effecting(
+            redispatch_request_id,
+            SYNTHETIC_TOOL,
+            (1,),
+            kwargs,
+            binding,
+        )
     fence_b = entry_b.fence
     if fence_b <= fence_a:
         failures.append(f"fence takeover: B fence {fence_b} not above A fence {fence_a}")
@@ -279,6 +287,9 @@ def _run_fence_takeover(
         failures.append(f"fence takeover: final fence {final.fence} != B fence {fence_b}")
     if final.result != {"charged": True}:
         failures.append("fence takeover: stale A write leaked into final entry")
+    duplicate_effect_rows = check_no_duplicate_effect_ids(iso.open_fresh_client().list_all())
+    for violation in duplicate_effect_rows:
+        failures.append(f"fence takeover: {violation.message}")
     for violation in check_at_most_one_committed([final]):
         failures.append(f"fence takeover: {violation.message}")
     for violation in check_at_most_one_committed_effect_state([final]):

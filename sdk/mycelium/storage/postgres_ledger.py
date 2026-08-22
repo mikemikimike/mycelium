@@ -68,8 +68,16 @@ class PostgresEntryStorage:
         query = self._sql.SQL(
             "CREATE TABLE IF NOT EXISTS {} (request_id TEXT PRIMARY KEY, payload JSONB NOT NULL)"
         ).format(self._table_id())
+        effect_index = self._sql.SQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} "
+            "((COALESCE(payload->>'effect_id', request_id)))"
+        ).format(
+            self._sql.Identifier(f"{self._table}_effect_id_idx"),
+            self._table_id(),
+        )
         with self._psycopg.connect(self._dsn) as conn:
             conn.execute(query)
+            conn.execute(effect_index)
             conn.commit()
         self._schema_ready = True
 
@@ -95,6 +103,17 @@ class PostgresEntryStorage:
             conn.execute(query, (entry.request_id, json.dumps(payload)))
             conn.commit()
 
+    def get_by_effect_id(self, effect_id: str) -> E | None:
+        self._ensure_schema()
+        query = self._sql.SQL(
+            "SELECT payload FROM {} WHERE COALESCE(payload->>'effect_id', request_id) = %s"
+        ).format(self._table_id())
+        with self._psycopg.connect(self._dsn) as conn:
+            row = conn.execute(query, (effect_id,)).fetchone()
+        if row is None:
+            return None
+        return self._from_dict(_payload_dict(row[0]))
+
     def try_claim_inflight(
         self,
         entry: E,
@@ -108,6 +127,10 @@ class PostgresEntryStorage:
         insert_query = self._sql.SQL(
             "INSERT INTO {} (request_id, payload) VALUES (%s, %s::jsonb) "
             "ON CONFLICT (request_id) DO NOTHING RETURNING request_id"
+        ).format(self._table_id())
+        select_by_effect_for_update = self._sql.SQL(
+            "SELECT request_id, payload FROM {} "
+            "WHERE COALESCE(payload->>'effect_id', request_id) = %s FOR UPDATE"
         ).format(self._table_id())
         select_for_update = self._sql.SQL(
             "SELECT payload FROM {} WHERE request_id = %s FOR UPDATE"
@@ -124,6 +147,22 @@ class PostgresEntryStorage:
                 ).fetchone()
                 if inserted is not None:
                     return "claimed", None
+
+                effect_id = str(getattr(entry, "effect_id", "") or "")
+                if effect_id:
+                    effect_row = conn.execute(
+                        select_by_effect_for_update,
+                        (effect_id,),
+                    ).fetchone()
+                    if effect_row is not None:
+                        canonical = self._from_dict(_payload_dict(effect_row[1]))
+                        # Same request_id: fall through to the request-keyed
+                        # reclaim path (EXPIRED/FAILED must be reclaimable).
+                        if canonical.request_id != entry.request_id:
+                            outcome = claim_inflight_outcome(canonical, now=now)
+                            if outcome == "completed":
+                                return "completed", canonical
+                            return "in_flight", canonical
 
                 row = conn.execute(select_for_update, (entry.request_id,)).fetchone()
                 if row is None:
@@ -229,6 +268,9 @@ class PostgresLedgerStorage:
 
     def set(self, entry: Any) -> None:
         self._inner.set(entry)
+
+    def get_by_effect_id(self, effect_id: str) -> Any:
+        return self._inner.get_by_effect_id(effect_id)
 
     def try_claim_inflight(
         self,

@@ -22,6 +22,7 @@ SCENARIO_ORDER = (
     "destructive-confirm",
     "authority-window",
     "use-time-currency",
+    "state-machine-exhaustive",
     "simulation",
 )
 
@@ -88,6 +89,7 @@ def ensure_builtin_scenarios_registered() -> None:
         redispatch,
         secret_in_args,
         simulation,
+        state_machine_exhaustive,
         storage_outage,
         use_time_currency,
         worker_crash,

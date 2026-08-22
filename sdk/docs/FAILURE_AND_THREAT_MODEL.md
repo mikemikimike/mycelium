@@ -33,8 +33,10 @@ Mycelium's core promise is narrow and specific (AF-002 flagship):
 "Prevent" means: at most one tool body run per transition, plus exactly one
 extra run per **provably not executed** verdict (an operator release
 `--verified not-executed` or a reconciler returning `NOT_EXECUTED`). The
-tool's *outcome* is decided by the transition state machine, never by
-blindly re-running the body. Provider adapters (e.g. Gmail sent-log) are
+tool's *outcome* is decided by the unified `EffectState` state machine
+(`INTENDED -> ATTEMPTING -> COMMITTED|ABORTED|UNKNOWN`), with
+`effect_phase`/`terminal_outcome` kept as compatibility storage views, never
+by blindly re-running the body. Provider adapters (e.g. Gmail sent-log) are
 demos of the `Reconciler` contract, not a separate product promise.
 
 This document is **explicitly out of scope** for:

@@ -192,6 +192,19 @@ def test_binding_explicit_blind_wins_over_provider_key() -> None:
     assert binding.explicit_capability == ToolCapability.BLIND
 
 
+def test_binding_explicit_blind_stays_blind_with_effect_key_propagation() -> None:
+    binding = ToolTransitionBinding.for_tool(
+        agent_id="demo",
+        policy_version="1",
+        side_effect_class=SideEffectClass.KEYED_MUTATE,
+        provider_idempotency_key_param="idempotency_key",
+        propagate_effect_id_as_provider_key=True,
+        capability=ToolCapability.BLIND,
+    )
+    assert binding.capability == ToolCapability.BLIND
+    assert binding.effective_capability(has_reconciler=True) == ToolCapability.BLIND
+
+
 def test_binding_explicit_queryable_no_mechanism_is_deferred_to_reconciler() -> None:
     """Explicit QUERYABLE on plain non-idempotent w/o provider key: floor stays
     BLIND, but effective_capability(has_reconciler=True) upgrades it."""
