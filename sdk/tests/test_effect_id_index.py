@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,59 @@ def test_inmemory_effect_id_resolves_to_canonical_request() -> None:
     assert by_effect is not None
     assert by_effect.request_id == "req-a"
     assert len(storage.list_all()) == 1
+
+
+def test_inmemory_effect_index_remains_complete_for_unique_rows_and_misses() -> None:
+    storage = InMemoryLedgerStorage()
+    entries = [
+        LedgerEntry(
+            request_id=f"request-{index}",
+            effect_id=f"effect-{index}",
+            tool="charge",
+            args=[index],
+            kwargs={"amount": index},
+            status="completed",
+            terminal_outcome="completed",
+            started_at=float(index),
+        )
+        for index in range(512)
+    ]
+    for entry in entries:
+        storage.set(entry)
+
+    assert storage.list_all() == entries
+    assert [
+        storage.get_by_effect_id(f"effect-{index}") for index in range(len(entries))
+    ] == entries
+    assert storage.get_by_effect_id("missing-effect") is None
+    assert storage.resolve_request_id("missing-effect") is None
+    assert storage.list_all() == entries
+
+
+def test_inmemory_effect_index_rejects_duplicates_and_repairs_stale_keys() -> None:
+    storage = InMemoryLedgerStorage()
+    canonical = LedgerEntry(
+        request_id="canonical",
+        effect_id="shared-effect",
+        tool="charge",
+        args=[],
+        kwargs={},
+        status="completed",
+        terminal_outcome="completed",
+        started_at=2.0,
+    )
+    duplicate = replace(canonical, request_id="duplicate", started_at=1.0)
+    storage.set(canonical)
+    storage.set(duplicate)
+
+    assert storage.list_all() == [canonical]
+    assert storage.get_by_effect_id("shared-effect") == canonical
+
+    replacement = replace(canonical, effect_id="replacement-effect")
+    storage.set(replacement)
+    assert storage.resolve_request_id("shared-effect") is None
+    assert storage.get_by_effect_id("replacement-effect") == replacement
+    assert storage.list_all() == [replacement]
 
 
 def test_file_storage_repairs_missing_sidecar_index(tmp_path: Path) -> None:

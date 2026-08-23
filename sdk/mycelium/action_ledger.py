@@ -990,11 +990,16 @@ class InMemoryLedgerStorage(LedgerStorage):
 
     def _resolve_effect_locked(self, effect_id: str) -> str | None:
         canonical = self._effect_index.get(effect_id)
-        if canonical is not None:
-            row = self._entries.get(canonical)
-            if row is not None and self._effect_ref(row) == effect_id:
-                return canonical
-            self._effect_index.pop(effect_id, None)
+        if canonical is None:
+            # Unlike durable backends, in-memory storage has no legacy rows to
+            # rebuild: every entry is created under this lock and indexed by
+            # set()/try_claim_inflight(). A missing key is therefore a true
+            # miss, and scanning all prior entries makes unique inserts O(n²).
+            return None
+        row = self._entries.get(canonical)
+        if row is not None and self._effect_ref(row) == effect_id:
+            return canonical
+        self._effect_index.pop(effect_id, None)
         candidates = [row for row in self._entries.values() if self._effect_ref(row) == effect_id]
         if not candidates:
             return None
