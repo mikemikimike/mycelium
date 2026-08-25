@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,11 @@ from mycelium import (
     InMemoryLedgerStorage,
     LedgerEntry,
     LedgerMigrationError,
+    LedgerSchemaVersionError,
     SqliteLedgerStorage,
     TerminalOutcome,
     apply_ledger_migration,
+    inspect_ledger_schema_versions,
     plan_ledger_migration,
 )
 from mycelium.__main__ import main
@@ -68,6 +71,23 @@ def test_future_schema_and_downgrade_fail_closed() -> None:
         plan_ledger_migration(storage, target_version=1)
 
 
+def test_runtime_reader_accepts_legacy_and_rejects_invalid_or_future_versions() -> None:
+    raw = _entry("version-check", version=2).to_dict()
+    raw.pop("schema_version")
+    legacy = LedgerEntry.from_dict(raw)
+    assert legacy.schema_version == 1
+    assert legacy.effect_id == "version-check"
+
+    for invalid in (True, 0, 1.5, "not-an-integer"):
+        raw["schema_version"] = invalid
+        with pytest.raises(LedgerSchemaVersionError, match="schema_version"):
+            LedgerEntry.from_dict(raw)
+
+    raw["schema_version"] = 3
+    with pytest.raises(LedgerSchemaVersionError, match="newer than this runtime"):
+        LedgerEntry.from_dict(raw)
+
+
 def test_active_v1_requires_explicit_override() -> None:
     storage = InMemoryLedgerStorage()
     storage.set(_entry("active", version=1, outcome=TerminalOutcome.IN_FLIGHT.value))
@@ -120,6 +140,18 @@ def test_cli_file_plan_apply_and_verify(tmp_path: Path, capsys) -> None:
     assert verified["backends"][0]["pending_entries"] == 0
 
 
+def test_cli_cleanly_refuses_future_file_schema(tmp_path: Path, capsys) -> None:
+    ledger_path = tmp_path / "future.json"
+    payload = _entry("future-cli", version=3).to_dict()
+    ledger_path.write_text(
+        json.dumps({"future-cli": payload}),
+        encoding="utf-8",
+    )
+
+    assert main(["migrate", "--plan", "--file", str(ledger_path)]) == 2
+    assert "newer than this runtime" in capsys.readouterr().err
+
+
 def test_cli_sqlite_plan_and_apply(tmp_path: Path, capsys) -> None:
     ledger_path = tmp_path / "ledger.db"
     storage = SqliteLedgerStorage(ledger_path)
@@ -133,6 +165,53 @@ def test_cli_sqlite_plan_and_apply(tmp_path: Path, capsys) -> None:
     migrated = storage.get("legacy-sqlite")
     assert migrated is not None
     assert migrated.schema_version == 2
+
+
+def test_raw_file_schema_inspection_is_read_only(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "ledger.json"
+    rows = {
+        "legacy": _entry("legacy", version=1).to_dict(),
+        "current": _entry("current", version=2).to_dict(),
+        "future": _entry("future", version=3).to_dict(),
+    }
+    ledger_path.write_text(json.dumps(rows), encoding="utf-8")
+    before = ledger_path.read_bytes()
+
+    versions = inspect_ledger_schema_versions(
+        {"storage": "file", "path": str(ledger_path)}
+    )
+
+    assert versions == {1: 1, 2: 1, 3: 1}
+    assert ledger_path.read_bytes() == before
+
+
+def test_raw_sqlite_schema_inspection_does_not_create_or_update_storage(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.db"
+    assert inspect_ledger_schema_versions(
+        {"storage": "sqlite", "path": str(missing)}
+    ) == {}
+    assert not missing.exists()
+
+    ledger_path = tmp_path / "ledger.db"
+    storage = SqliteLedgerStorage(ledger_path)
+    storage.set(_entry("legacy", version=1))
+    with sqlite3.connect(ledger_path) as conn:
+        payload = _entry("future", version=3).to_dict()
+        conn.execute(
+            "INSERT INTO mycelium_action_ledger (request_id, payload) VALUES (?, ?)",
+            ("future", json.dumps(payload)),
+        )
+        conn.commit()
+    before = ledger_path.read_bytes()
+
+    versions = inspect_ledger_schema_versions(
+        {"storage": "sqlite", "path": str(ledger_path)}
+    )
+
+    assert versions == {1: 1, 3: 1}
+    assert ledger_path.read_bytes() == before
 
 
 def test_cli_requires_plan_or_apply() -> None:

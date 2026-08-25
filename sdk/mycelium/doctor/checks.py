@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from mycelium.action_ledger import LEDGER_ENTRY_SCHEMA_VERSION
 from mycelium.config import (
     PROFILE_PRODUCTION,
     MyceliumConfig,
@@ -37,6 +38,7 @@ from mycelium.doctor.types import (
     DoctorCheck,
     DoctorStatus,
 )
+from mycelium.ledger_migrations import inspect_ledger_schema_versions
 from mycelium.loop_guard import MISSING_RUN_ID_POLICY_ERROR
 from mycelium.outcome_emit import (
     OUTCOME_ON_FAILURE_ERROR,
@@ -508,6 +510,98 @@ def check_action_ledger(ctx: DoctorContext) -> Iterable[DoctorCheck]:
     probe = _probe_storage(ctx, raw=sample, label="action_ledger")
     if probe is not None:
         yield probe
+
+    durable_raws: list[dict[str, Any]] = []
+    for name in consequential:
+        candidate = _ledger_storage_for_tool(cfg, name)
+        if _storage_type(candidate) != "memory" and candidate not in durable_raws:
+            durable_raws.append(candidate)
+    if not durable_raws:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="No durable ledger rows to inspect",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+    if not ctx.connectivity:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="Ledger schema inspection skipped (--no-connectivity)",
+            remediation="Run mycelium doctor with connectivity enabled.",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+    if probe is not None and probe.status == DoctorStatus.FAIL:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.SKIP,
+            summary="Ledger schema could not be inspected",
+            details="The connectivity check failed first.",
+            remediation="Restore backend connectivity, then run mycelium doctor again.",
+            evidence=EVIDENCE_NOT_VERIFIABLE,
+            blocking=False,
+        )
+        return
+
+    versions: dict[int, int] = {}
+    try:
+        for raw in durable_raws:
+            for version, count in inspect_ledger_schema_versions(raw).items():
+                versions[version] = versions.get(version, 0) + count
+    except Exception as exc:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.FAIL,
+            summary="Ledger schema inspection failed",
+            details=redact_secrets(str(exc)),
+            remediation="Repair the malformed row or backend, then run migration planning.",
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
+        return
+
+    version_detail = ", ".join(
+        f"v{version}={count}" for version, count in sorted(versions.items())
+    ) or "no rows"
+    future = sorted(version for version in versions if version > LEDGER_ENTRY_SCHEMA_VERSION)
+    older = sorted(version for version in versions if version < LEDGER_ENTRY_SCHEMA_VERSION)
+    if future:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.FAIL,
+            summary="Ledger contains unsupported future schema versions",
+            details=version_detail,
+            remediation="Upgrade Mycelium before reading or modifying these ledger rows.",
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
+    elif older:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.WARN,
+            summary="Ledger migration is available",
+            details=version_detail,
+            remediation="Run 'mycelium migrate --plan', back up, then use --apply.",
+            evidence=EVIDENCE_CONNECTIVITY,
+            blocking=False,
+        )
+    else:
+        yield _check(
+            id="ledger.schema",
+            category="Action ledger",
+            status=DoctorStatus.PASS,
+            summary=f"Ledger schema is current (v{LEDGER_ENTRY_SCHEMA_VERSION})",
+            details=version_detail,
+            evidence=EVIDENCE_CONNECTIVITY,
+        )
 
 
 @doctor_check("run_identity")

@@ -99,6 +99,10 @@ class LedgerError(Exception):
     """Raised when the action ledger cannot record or verify an action."""
 
 
+class LedgerSchemaVersionError(LedgerError):
+    """Raised when a durable ledger row uses an invalid or future schema."""
+
+
 class LedgerPendingError(Exception):
     """Raised when the same request is already in-flight."""
 
@@ -565,6 +569,32 @@ def _lease_auto_renew(
 LEDGER_ENTRY_SCHEMA_VERSION = 2
 
 
+def _read_ledger_entry_schema_version(data: Mapping[str, Any]) -> int:
+    raw = data.get("schema_version", 1)
+    if isinstance(raw, bool):
+        raise LedgerSchemaVersionError("ledger schema_version must be an integer >= 1")
+    if not isinstance(raw, (int, str)):
+        raise LedgerSchemaVersionError(
+            f"ledger schema_version must be an integer, got {raw!r}"
+        )
+    try:
+        version = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise LedgerSchemaVersionError(
+            f"ledger schema_version must be an integer, got {raw!r}"
+        ) from exc
+    if version < 1:
+        raise LedgerSchemaVersionError(
+            f"ledger schema_version must be >= 1, got {version}"
+        )
+    if version > LEDGER_ENTRY_SCHEMA_VERSION:
+        raise LedgerSchemaVersionError(
+            f"ledger schema {version} is newer than this runtime supports "
+            f"({LEDGER_ENTRY_SCHEMA_VERSION}); upgrade Mycelium before reading it"
+        )
+    return version
+
+
 @contextmanager
 def side_effect() -> Iterator[None]:
     """Wrap the external operation of a side-effecting tool.
@@ -779,6 +809,7 @@ class LedgerEntry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LedgerEntry:
+        schema_version = _read_ledger_entry_schema_version(data)
         status = str(data["status"])
         lease_until = float(data["lease_until"]) if data.get("lease_until") is not None else None
         terminal_raw = data.get("terminal_outcome")
@@ -834,7 +865,7 @@ class LedgerEntry:
                 for item in (data.get("request_id_aliases") or (request_id,))
                 if item is not None and str(item)
             ),
-            schema_version=int(data.get("schema_version") or 1),
+            schema_version=schema_version,
             parent_request_id=(
                 str(data["parent_request_id"])
                 if data.get("parent_request_id") is not None

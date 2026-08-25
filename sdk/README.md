@@ -566,8 +566,10 @@ the destination-aware derivation.
 ### Ledger schema migrations
 
 Ledger schema 2 adds durable `effect_id`, `request_id_aliases`, and
-`schema_version`. Older rows remain readable without migration, but deployments
-that retain durable ledgers can rewrite them explicitly:
+`schema_version`. The top-level `schema_version` field is the ledger row's
+versioned envelope; there is no separate wrapper. Older rows remain readable
+without migration, but deployments that retain durable ledgers can rewrite them
+explicitly:
 
 ```bash
 # Read-only preview. Repeat the storage flag for the apply command.
@@ -584,11 +586,16 @@ The v1→v2 rule sets a missing `effect_id` to the existing `request_id`, sets
 `request_id_aliases` to include that canonical request id, and writes
 `schema_version: 2`; it never invents an empty identity. Planning does not
 rewrite ledger rows, application is idempotent, unsupported future versions
-fail closed, and active
+fail closed during both normal reads and migration planning, and active
 `IN_FLIGHT` rows are refused unless `--allow-active` is given after workers are
 confirmed stopped. The same `--file`, `--sqlite`, `--redis-url`,
 `--postgres-dsn`, or `--config` storage selection used by operator commands is
 supported.
+
+`mycelium doctor` inspects durable ledger versions without creating tables or
+rewriting rows. With connectivity enabled it reports PASS for current rows,
+WARN when migration is available, and FAIL for malformed or unsupported future
+versions. `--no-connectivity` reports this check as SKIP.
 
 Rollback is restore-based: before `--apply`, snapshot/copy the file or SQLite
 database, take a Redis snapshot, or use a Postgres backup/transactional snapshot.

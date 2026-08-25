@@ -484,6 +484,7 @@ def cmd_transitions_mark_dead(args: argparse.Namespace) -> int:
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     """Plan or apply explicit ActionLedger schema migrations."""
+    from mycelium.action_ledger import LedgerSchemaVersionError
     from mycelium.config import ConfigError
     from mycelium.ledger_migrations import (
         LedgerMigrationError,
@@ -497,7 +498,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             plan_ledger_migration(storage, target_version=args.target_version)
             for storage in storages
         ]
-    except (ConfigError, LedgerMigrationError, OSError, ValueError) as exc:
+    except (
+        ConfigError,
+        LedgerMigrationError,
+        LedgerSchemaVersionError,
+        OSError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -544,7 +551,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             )
             for storage in storages
         ]
-    except (LedgerMigrationError, OSError, ValueError) as exc:
+    except (LedgerMigrationError, LedgerSchemaVersionError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
