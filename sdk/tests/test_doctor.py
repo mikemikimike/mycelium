@@ -515,6 +515,51 @@ tools:
     assert code_strict == 1
 
 
+def test_doctor_fix_adds_only_version_and_schema_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write(
+        tmp_path,
+        """# user comment
+tools:
+  mystery: {}
+""",
+    )
+    original = path.read_text(encoding="utf-8")
+
+    code = main(["doctor", "-c", str(path), "--fix", "--json", "--no-connectivity"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["warning_count"] >= 1
+    assert "fixed [config.version]" in captured.err
+
+    updated = path.read_text(encoding="utf-8")
+    assert updated.endswith(original)
+    assert updated.startswith("# yaml-language-server:")
+    assert "config_version: 1\n" in updated
+    schema_path = tmp_path / "mycelium.schema.json"
+    assert json.loads(schema_path.read_text(encoding="utf-8"))["$id"]
+
+    main(["doctor", "-c", str(path), "--fix", "--json", "--no-connectivity"])
+    second = capsys.readouterr()
+    assert second.err == ""
+    assert path.read_text(encoding="utf-8") == updated
+
+
+def test_doctor_fix_refuses_invalid_or_future_config(tmp_path: Path) -> None:
+    from mycelium.doctor.fixes import apply_conservative_fixes
+
+    invalid = tmp_path / "invalid.yaml"
+    invalid.write_text("tools: [", encoding="utf-8")
+    future = tmp_path / "future.yaml"
+    future.write_text("config_version: 99\n", encoding="utf-8")
+
+    assert apply_conservative_fixes(invalid) == []
+    assert apply_conservative_fixes(future) == []
+    assert invalid.read_text(encoding="utf-8") == "tools: ["
+    assert future.read_text(encoding="utf-8") == "config_version: 99\n"
+
+
 def test_doctor_never_executes_tools(tmp_path: Path) -> None:
     calls = {"n": 0}
 

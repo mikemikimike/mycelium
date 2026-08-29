@@ -133,8 +133,12 @@ Mycelium is an **embeddable transition envelope at the tool boundary** — class
 pip install mycelium-runtime
 pip install 'mycelium-runtime[langgraph]'  # optional automatic LangGraph IDs
 mycelium init              # on-ramp: duplicate-tool fix → ./mycelium.yaml
+mycelium init --detect     # inspect local dependencies/@tool functions and tailor a safe starter
 mycelium init --full       # reference: every guard section (not the default)
 mycelium init --minimal    # smaller multi-guard scaffold
+mycelium config schema -o mycelium.schema.json  # JSON Schema / IDE completion
+mycelium config docs       # reference generated from the typed model
+mycelium config example    # model-validated example YAML
 mycelium demo              # feature tour: unguarded vs ledgered + gates / hard-block / release
 mycelium demo --redis      # optional Cloud-style 2-worker Redis proof
 ```
@@ -613,21 +617,29 @@ schema cannot represent every newer record safely.
 canonical effect row. It preserves redispatch history; it does not create a new
 effect or grant permission.
 
-The public API is exported from `mycelium`:
+## Public API namespaces
+
+Existing imports from `mycelium` remain supported; this namespace change does
+not require an application migration. New code should use the package root for
+the recommended API, `mycelium.runtime` for stable low-level building blocks,
+and `mycelium.integrations` for optional framework adapters. APIs incubating
+without a full stability promise live under `mycelium.experimental`. Nothing
+under `mycelium._internal` is public.
 
 ```python
-from mycelium import (
-    Decision,
-    DecisionIntent,
-    DecisionSnapshot,
-    EffectState,
-    PredicateVerdict,
-    ToolCapability,
-    derive_effect_id_for_call,
-    register_decision_predicate,
-    resolve_effect_state,
-)
+from mycelium import ledger_sync, load_config
+from mycelium.integrations import instrument_langgraph_tool
+from mycelium.runtime import ActionLedger, TransitionScope
 ```
+
+The reviewed contract is stored in `api-snapshot.json` and checked by the test
+suite on every CI run. An intentional public API change must preserve existing
+imports or include deprecation metadata, compatibility tests, and a regenerated
+snapshot (`python scripts/update_api_snapshot.py`).
+
+The package root still re-exports historical low-level APIs for compatibility.
+Moving an import to `mycelium.runtime` is optional until a separately announced
+deprecation says otherwise.
 
 `EffectState` is the durable write-ahead intent:
 
@@ -2220,10 +2232,11 @@ refuses conflicting destination records instead of guessing which copy wins.
 ### `mycelium doctor` (verify protection is real)
 
 Installing Mycelium does not prove a deployment is protected. `mycelium doctor`
-is a **read-only** verifier for configuration and detectable wiring:
+is a **read-only by default** verifier for configuration and detectable wiring:
 
 ```console
 $ mycelium doctor --config mycelium.yaml
+$ mycelium doctor --config mycelium.yaml --fix  # version/schema metadata only
 $ mycelium doctor --config mycelium.yaml --strict --json   # CI gate
 ```
 
@@ -2233,7 +2246,9 @@ budget adapter selection, secret-in-args scanning / fail-closed production,
 destination-policy coverage,
 and optional `deployment.topology`. It never executes
 application tools, never calls an LLM, never writes ledger/outcome rows, and
-never repairs config.
+does not repair runtime policy. The opt-in `--fix` mode only adds an explicit
+`config_version`, a YAML editor schema hint, and a local JSON Schema sidecar. It
+does not guess tool classifications, storage, credentials, or production policy.
 
 Evidence labels distinguish what Mycelium can prove (`statically_verified`,
 `runtime_registration_verified`, `connectivity_verified`) from what remains an

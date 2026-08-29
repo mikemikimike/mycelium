@@ -1,0 +1,179 @@
+"""Conservative local-project detection for ``mycelium init --detect``."""
+
+from __future__ import annotations
+
+import ast
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from mycelium.config_schema import CONFIG_VERSION, config_json_schema
+
+_IGNORED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "build",
+    "dist",
+    "node_modules",
+    "tests",
+}
+_FRAMEWORK_NAMES = ("langgraph", "langchain", "crewai", "smolagents")
+
+
+@dataclass(frozen=True)
+class DetectedTool:
+    name: str
+    callable_path: str
+
+
+@dataclass(frozen=True)
+class ProjectDetection:
+    frameworks: tuple[str, ...]
+    tools: tuple[DetectedTool, ...]
+    scanned_files: int
+
+
+def _module_name(path: Path, project: Path) -> str | None:
+    source_root = project / "src"
+    base = source_root if source_root.is_dir() and path.is_relative_to(source_root) else project
+    relative = path.relative_to(base).with_suffix("")
+    parts = list(relative.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    if not parts or any(not part.isidentifier() for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def _decorator_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def detect_project(project: Path, *, max_files: int = 500) -> ProjectDetection:
+    """Inspect dependency text and decorated Python tools without importing code."""
+
+    project = project.resolve()
+    dependency_text: list[str] = []
+    for name in ("pyproject.toml", "requirements.txt", "requirements-dev.txt"):
+        path = project / name
+        if path.is_file() and path.stat().st_size <= 1_000_000:
+            dependency_text.append(path.read_text(encoding="utf-8", errors="ignore").lower())
+
+    frameworks: set[str] = set()
+    tools: list[DetectedTool] = []
+    used_names: set[str] = set()
+    scanned = 0
+    for path in sorted(project.rglob("*.py")):
+        relative = path.relative_to(project)
+        if any(part in _IGNORED_DIRS or part.startswith(".") for part in relative.parts[:-1]):
+            continue
+        if scanned >= max_files:
+            break
+        try:
+            if path.stat().st_size > 1_000_000:
+                continue
+            source = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        scanned += 1
+        lowered = source.lower()
+        for framework in _FRAMEWORK_NAMES:
+            if framework in lowered:
+                frameworks.add(framework)
+        module = _module_name(path, project)
+        if module is None:
+            continue
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(_decorator_name(item) == "tool" for item in node.decorator_list):
+                continue
+            if node.name in used_names:
+                continue
+            used_names.add(node.name)
+            tools.append(DetectedTool(node.name, f"{module}:{node.name}"))
+
+    joined_dependencies = "\n".join(dependency_text)
+    for framework in _FRAMEWORK_NAMES:
+        if framework in joined_dependencies:
+            frameworks.add(framework)
+    return ProjectDetection(tuple(sorted(frameworks)), tuple(tools[:50]), scanned)
+
+
+def render_detected_config(project: Path) -> tuple[str, ProjectDetection]:
+    """Render a loadable starter, over-classifying detected tools for safety."""
+
+    detection = detect_project(project)
+    agent_id = project.resolve().name.replace(" ", "-") or "mycelium-agent"
+    tool_names = [tool.name for tool in detection.tools]
+    data: dict[str, Any] = {
+        "config_version": CONFIG_VERSION,
+        "profile": "development",
+        "transition": {
+            "agent_id": agent_id,
+            "policy_version": "1",
+            "reclaim_requires_death_signal": True,
+        },
+        "state_backend": {"storage": "file", "path": "./mycelium-state.json"},
+        "action_ledger": {
+            "storage": "sqlite",
+            "path": "./mycelium-ledger.db",
+            "tools": tool_names,
+            "unclassified_policy": "strict",
+        },
+        "tools": {
+            tool.name: {
+                "callable": tool.callable_path,
+                # Conservatively assume mutation until a human/agent reviews it.
+                "side_effect_class": "non_idempotent_mutate",
+            }
+            for tool in detection.tools
+        },
+    }
+    if "langgraph" in detection.frameworks:
+        data["integrations"] = {"langgraph": {"enabled": True}}
+    header = (
+        "# Generated by mycelium init --detect; review detected tool classifications.\n"
+        "# Detected tools default to non_idempotent_mutate (the safer assumption).\n"
+        "# yaml-language-server: $schema=./mycelium.schema.json\n"
+    )
+    return header + yaml.safe_dump(data, sort_keys=False), detection
+
+
+def write_schema_sidecar(output: Path, *, force: bool = False) -> Path | None:
+    """Write the editor schema beside a config without replacing an existing file."""
+
+    schema_path = output.with_name("mycelium.schema.json")
+    if schema_path.exists() and not force:
+        return None
+    schema_path.write_text(
+        json.dumps(config_json_schema(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return schema_path
+
+
+__all__ = [
+    "DetectedTool",
+    "ProjectDetection",
+    "detect_project",
+    "render_detected_config",
+    "write_schema_sidecar",
+]

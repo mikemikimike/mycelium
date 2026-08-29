@@ -116,6 +116,59 @@ def test_config_schema_writes_file(tmp_path: Path) -> None:
     assert schema["$id"].endswith("mycelium-config-v1.json")
 
 
+def test_config_docs_and_example_are_generated_from_model(capsys) -> None:
+    assert main(["config", "docs"]) == 0
+    docs = capsys.readouterr().out
+    assert "# Mycelium configuration reference" in docs
+    assert "`config_version`" in docs
+    assert "## Transition" in docs
+
+    assert main(["config", "example"]) == 0
+    example = capsys.readouterr().out
+    assert "config_version: 1" in example
+    assert "unclassified_policy: strict" in example
+
+
+def test_init_detect_finds_framework_and_decorated_tool(tmp_path: Path, capsys) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["langgraph"]\n', encoding="utf-8"
+    )
+    package = tmp_path / "agent"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "from langchain_core.tools import tool\n"
+        "@tool\n"
+        "def send_email(address: str) -> str:\n"
+        "    return address\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "mycelium.yaml"
+
+    assert main(["init", "--detect", "--project", str(tmp_path), "-o", str(output)]) == 0
+    config = load_config(output)
+    assert config.langgraph_enabled
+    assert config.tools["send_email"].callable_path == "agent.tools:send_email"
+    assert (
+        config.tools["send_email"].side_effect_class
+        == SideEffectClass.NON_IDEMPOTENT_MUTATE
+    )
+    schema = json.loads((tmp_path / "mycelium.schema.json").read_text(encoding="utf-8"))
+    assert schema["properties"]["config_version"]["const"] == 1
+    stdout = capsys.readouterr().out
+    assert "Detected frameworks: langchain, langgraph" in stdout
+    assert "mutation was assumed for safety" in stdout
+
+
+def test_init_modes_are_mutually_exclusive() -> None:
+    try:
+        main(["init", "--detect", "--minimal"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:  # pragma: no cover - argparse must reject this combination
+        raise AssertionError("mutually exclusive init modes were accepted")
+
+
 def test_run_rejects_missing_command_and_unsafe_python_flags(
     tmp_path: Path,
     capsys,

@@ -42,14 +42,39 @@ def _load_template(*, full: bool, minimal: bool) -> tuple[str, str]:
     return path.read_text(encoding="utf-8"), label
 
 
-def cmd_init(output: Path, *, full: bool, minimal: bool, force: bool) -> int:
+def cmd_init(
+    output: Path,
+    *,
+    full: bool,
+    minimal: bool,
+    force: bool,
+    detect: bool = False,
+    project: Path = Path("."),
+) -> int:
     if output.exists() and not force:
         print(f"error: {output} already exists (use --force to overwrite)", file=sys.stderr)
         return 1
-    text, label = _load_template(full=full, minimal=minimal)
+    if detect:
+        from mycelium.config_detect import render_detected_config, write_schema_sidecar
+
+        text, detection = render_detected_config(project)
+        label = "detected"
+    else:
+        text, label = _load_template(full=full, minimal=minimal)
+        detection = None
     output.write_text(text, encoding="utf-8")
     print(f"Wrote {output} ({label} template)")
-    if label == "quickstart":
+    if detection is not None:
+        schema_path = write_schema_sidecar(output, force=force)
+        frameworks = ", ".join(detection.frameworks) or "none"
+        print(
+            f"Detected frameworks: {frameworks}; decorated tools: "
+            f"{len(detection.tools)}; scanned Python files: {detection.scanned_files}."
+        )
+        if schema_path is not None:
+            print(f"Wrote {schema_path} (IDE schema)")
+        print("Review detected tools before production use; mutation was assumed for safety.")
+    elif label == "quickstart":
         print(
             "Next: install mycelium-runtime[langgraph], fill the IDs/callable path, "
             "then use 'mycelium run -- python -m your_package.app'."
@@ -75,6 +100,29 @@ def cmd_config_schema(output: Path | None) -> int:
         output.write_text(text, encoding="utf-8")
         print(f"Wrote {output}")
     return 0
+
+
+def _write_or_print_config_artifact(text: str, output: Path | None) -> int:
+    if output is None:
+        print(text, end="")
+    else:
+        output.write_text(text, encoding="utf-8")
+        print(f"Wrote {output}")
+    return 0
+
+
+def cmd_config_docs(output: Path | None) -> int:
+    """Print or write reference Markdown generated from JSON Schema."""
+    from mycelium.config_artifacts import render_config_reference
+
+    return _write_or_print_config_artifact(render_config_reference(), output)
+
+
+def cmd_config_example(output: Path | None) -> int:
+    """Print or write a model-validated starter configuration."""
+    from mycelium.config_artifacts import render_config_example
+
+    return _write_or_print_config_artifact(render_config_example(), output)
 
 
 def cmd_demo(*, redis: bool = False, slow: bool = False) -> int:
@@ -1338,11 +1386,17 @@ def cmd_budget_release(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Read-only production-safety verification (never executes tools/LLMs)."""
+    """Production-safety verification with narrowly scoped opt-in fixes."""
     import sys
 
     from mycelium.doctor import exit_code_for_report, run_doctor
     from mycelium.doctor.render import write_report
+
+    if args.fix:
+        from mycelium.doctor.fixes import apply_conservative_fixes
+
+        for fix in apply_conservative_fixes(args.config):
+            print(f"fixed [{fix.id}] {fix.summary}: {fix.path}", file=sys.stderr)
 
     report = run_doctor(
         args.config,
@@ -1466,12 +1520,13 @@ def main(argv: list[str] | None = None) -> int:
 
     doctor_parser = sub.add_parser(
         "doctor",
-        help="Verify production safety configuration and wiring (read-only)",
+        help="Verify production safety configuration and wiring",
         description=(
-            "Read-only verification that Mycelium protections are actually "
+            "Verification that Mycelium protections are actually "
             "configured and detectably wired — not merely installed. Never "
             "executes application tools, never calls an LLM, never writes "
-            "ledger/outcome rows, and never repairs config. "
+            "ledger/outcome rows. It is read-only unless --fix is supplied; "
+            "fixes are limited to version/schema metadata. "
             "CI gate: mycelium doctor --config mycelium.yaml --strict --json"
         ),
     )
@@ -1501,6 +1556,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-connectivity",
         action="store_true",
         help="Skip safe backend connectivity probes",
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Add only safe config-version and IDE-schema metadata, then verify",
     )
     doctor_parser.add_argument(
         "--timeout",
@@ -1621,15 +1681,27 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("mycelium.yaml"),
         help="Output path (default: ./mycelium.yaml)",
     )
-    init_parser.add_argument(
+    init_mode = init_parser.add_mutually_exclusive_group()
+    init_mode.add_argument(
         "--full",
         action="store_true",
         help="Reference template with all guards (not the default on-ramp)",
     )
-    init_parser.add_argument(
+    init_mode.add_argument(
         "--minimal",
         action="store_true",
         help="Smaller multi-guard scaffold (not the default on-ramp)",
+    )
+    init_mode.add_argument(
+        "--detect",
+        action="store_true",
+        help="Inspect this project and create a conservative tailored starter",
+    )
+    init_parser.add_argument(
+        "--project",
+        type=Path,
+        default=Path("."),
+        help="Project directory scanned by --detect (default: current directory)",
     )
     init_parser.add_argument(
         "--force",
@@ -1651,6 +1723,26 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         help="Write the schema to a file instead of stdout",
+    )
+    config_docs_parser = config_sub.add_parser(
+        "docs",
+        help="Print Markdown reference generated from the typed model",
+    )
+    config_docs_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write Markdown to a file instead of stdout",
+    )
+    config_example_parser = config_sub.add_parser(
+        "example",
+        help="Print a model-validated example configuration",
+    )
+    config_example_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Write YAML to a file instead of stdout",
     )
 
     demo_parser = sub.add_parser(
@@ -2230,7 +2322,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "init":
-        return cmd_init(args.output, full=args.full, minimal=args.minimal, force=args.force)
+        return cmd_init(
+            args.output,
+            full=args.full,
+            minimal=args.minimal,
+            force=args.force,
+            detect=args.detect,
+            project=args.project,
+        )
     if args.command == "demo":
         return cmd_demo(redis=args.redis, slow=args.slow)
     if args.command == "run":
@@ -2240,6 +2339,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "config":
         if args.config_command == "schema":
             return cmd_config_schema(args.output)
+        if args.config_command == "docs":
+            return cmd_config_docs(args.output)
+        if args.config_command == "example":
+            return cmd_config_example(args.output)
     if args.command == "state":
         if args.state_command == "migrate":
             return cmd_state_migrate(args)

@@ -5,6 +5,16 @@ small PyPI versions. Pre-release checklist: [sdk/docs/RELEASE.md](sdk/docs/RELEA
 
 ## Unreleased
 
+### Added
+
+- Stable public API organization through the recommended package root plus
+  `mycelium.runtime`, `mycelium.integrations`, `mycelium.experimental`, and
+  private `mycelium._internal` namespaces. A reviewed API snapshot,
+  compatibility tests, and deprecation metadata now guard accidental breakage.
+- Generated configuration reference documentation and validated example YAML,
+  project-aware `mycelium init --detect`, and opt-in conservative
+  `mycelium doctor --fix` support limited to version and IDE-schema metadata.
+
 ## 1.37.0 (2026-08-29)
 
 ### Added
